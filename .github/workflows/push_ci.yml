@@ -17,129 +17,90 @@ jobs:
     if: ${{ !startsWith(github.event.head_commit.message, '[skip ci]') }}
 
     steps:
-      - uses: actions/checkout@v3.3.0
+      - uses: actions/checkout@v4
         with:
           submodules: 'recursive'
           fetch-depth: 0
 
-      - name: set up JDK 17
-        uses: actions/setup-java@v3.9.0
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
           java-version: '17'
-          distribution: 'adopt'
+          distribution: 'temurin'
           cache: gradle
 
       - name: Cache Gradle Dependencies
-        uses: actions/cache@v3.2.4
+        uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
             !~/.gradle/caches/build-cache-*
-          key: gradle-deps-core-${{ hashFiles('**/build.gradle.kts', '**/build.gradle', '**/libs.versions.toml') }}
-          restore-keys: |
-            gradle-deps
+          key: gradle-deps-${{ hashFiles('**/build.gradle.kts', '**/build.gradle', '**/libs.versions.toml') }}
+          restore-keys: gradle-deps
 
       - name: Cache Gradle Build
-        uses: actions/cache@v3.2.4
+        uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches/build-cache-*
             ~/.gradle/buildOutputCleanup/cache.properties
-          key: gradle-builds-core-${{ github.sha }}
-          restore-keys: |
-            gradle-builds
+          key: gradle-builds-${{ github.sha }}
+          restore-keys: gradle-builds
 
-      - name: Setup SDK
+      - name: Setup Android SDK
         run: |
           echo "ANDROID_HOME=${ANDROID_HOME}"
           echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
           mkdir -p "$ANDROID_HOME/licenses/"
-          echo > "$ANDROID_HOME/licenses/android-sdk-license"
-          echo -n 24333f8a63b6825ea9c5514f83c2829b004d1fee > "$ANDROID_HOME/licenses/android-sdk-license"
+          echo "24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$ANDROID_HOME/licenses/android-sdk-license"
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "cmake;3.31.1"
           echo "sdk.dir=${ANDROID_HOME}" > local.properties
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
-
-      - name: Build with Gradle
+      - name: Build Release APK
         run: |
           echo "${{ secrets.SIGN_KEYSTORE_BASE64 }}" | base64 -d > keystore.jks
-          ./gradlew :app:assembleRelease
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
         env:
           KEYSTORE_PATH: "../keystore.jks"
           KEYSTORE_PASSWORD: ${{ secrets.SIGN_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.SIGN_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.SIGN_KEY_PASSWORD }}
 
-      - name: Upload Artifacts
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
-        # don't upload the artifacts if it's a pull request
         if: ${{ !github.event.pull_request }}
         with:
-          path: './app/build/outputs/*'
           name: build_output_${{ github.event.head_commit.id }}
-
-  upload-telegram:
-    name: Upload Release
-    if: ${{ success() && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-latest
-    needs:
-      - build
-      - telegram-bot-api
-    steps:
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: build_output_*
-          path: artifacts
-      - name: Download Telegram Bot API Binary
-        uses: actions/download-artifact@v4
-        with:
-          name: telegram-bot-api-binary
-          path: .
-      - name: Release
-        env:
-          COMMIT_MESSAGE: |+
-            New push to github\!
-            ```
-            ${{ github.event.head_commit.message }}
-            ```by `${{ github.event.head_commit.author.name }}`
-            See commit detail [here](${{ github.event.head_commit.url }})
-          COMMIT_URL: ${{ github.event.head_commit.url }}
-        run: |
-          ESCAPED=`python3 -c 'import json,os,urllib.parse; msg = json.dumps(os.environ["COMMIT_MESSAGE"]); print(urllib.parse.quote(msg if len(msg) <= 1024 else json.dumps(os.environ["COMMIT_URL"])))'`
-          find .
-          export universal=$(find artifacts -name "*.apk")
-          echo "universal=$universal"
-          chmod +x telegram-bot-api-binary
-          ./telegram-bot-api-binary --api-id=21724 --api-hash=3e0cb5efcd52300aec5994fdfc5bdc16 --local 2>&1 > /dev/null &
-          curl -v "http://127.0.0.1:8081/bot${{ secrets.TELEGRAM_TOKEN  }}/sendMediaGroup?chat_id=-${{ vars.TG_CI_UPLOAD_TARGET_CHANNEL }}&message_thread_id=${{ vars.TG_CI_UPLOAD_TARGET_REPLY_ID }}&media=%5B%7B%22type%22%3A%22document%22%2C%20%22media%22%3A%22attach%3A%2F%2Funiversal%22%2C%22parse_mode%22%3A%22MarkdownV2%22%2C%22caption%22:${ESCAPED}%7D%5D" \
-           -F universal="@$universal"
-          pkill telegram-bot
+          path: './app/build/outputs/apk/**/*.apk'
+          retention-days: 30
 
   telegram-bot-api:
-    name: Telegram Bot API
+    name: Build Telegram Bot API
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v3.3.0
+        uses: actions/checkout@v4
+
       - name: Clone Telegram Bot API
         run: |
           git clone --recursive https://github.com/tdlib/telegram-bot-api.git
-          git status telegram-bot-api >> telegram-bot-api-status
+          cd telegram-bot-api
+          git rev-parse HEAD > ../bot-api-version.txt
+
       - name: Cache Bot API Binary
         id: cache-bot-api
-        uses: actions/cache@v3.2.4
+        uses: actions/cache@v4
         with:
           path: telegram-bot-api-binary
-          key: CI-telegram-bot-api-${{ hashFiles('telegram-bot-api-status') }}
+          key: telegram-bot-api-${{ hashFiles('bot-api-version.txt') }}
+
       - name: Compile Telegram Bot API
         if: steps.cache-bot-api.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install make git zlib1g-dev libssl-dev gperf cmake g++
+          sudo apt-get install -y make git zlib1g-dev libssl-dev gperf cmake g++
           cd telegram-bot-api
           rm -rf build
           mkdir build
@@ -147,10 +108,72 @@ jobs:
           cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX:PATH=.. ..
           cmake --build . --target install -j$(nproc)
           cd ../..
-          ls -l telegram-bot-api/bin/telegram-bot-api*
           cp telegram-bot-api/bin/telegram-bot-api telegram-bot-api-binary
+          chmod +x telegram-bot-api-binary
+
       - name: Upload Binary
         uses: actions/upload-artifact@v4
         with:
           name: telegram-bot-api-binary
           path: telegram-bot-api-binary
+          retention-days: 30
+
+  upload-telegram:
+    name: Upload to Telegram
+    if: ${{ success() && github.ref == 'refs/heads/main' && !github.event.pull_request }}
+    runs-on: ubuntu-latest
+    needs: [build, telegram-bot-api]
+
+    steps:
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: build_output_*
+          path: artifacts
+
+      - name: Download Telegram Bot API Binary
+        uses: actions/download-artifact@v4
+        with:
+          name: telegram-bot-api-binary
+          path: .
+
+      - name: Prepare Commit Message
+        id: prepare
+        run: |
+          cat << 'EOF' > commit_msg.txt
+          New push to github!
+          ```
+          ${{ github.event.head_commit.message }}
+          ```
+          by `${{ github.event.head_commit.author.name }}`
+          See commit detail [here](${{ github.event.head_commit.url }})
+          EOF
+          
+          ESCAPED=$(python3 -c '
+          import json, os, urllib.parse
+          with open("commit_msg.txt") as f:
+              msg = f.read()
+          escaped = urllib.parse.quote(json.dumps(msg if len(msg) <= 1024 else "${{ github.event.head_commit.url }}"))
+          print(escaped)
+          ')
+          echo "escaped_message=${ESCAPED}" >> $GITHUB_OUTPUT
+
+      - name: Upload to Telegram
+        run: |
+          APK_FILE=$(find artifacts -name "*.apk" -type f | head -n 1)
+          echo "Found APK: $APK_FILE"
+          
+          chmod +x telegram-bot-api-binary
+          ./telegram-bot-api-binary --api-id=21724 --api-hash=3e0cb5efcd52300aec5994fdfc5bdc16 --local > /dev/null 2>&1 &
+          BOT_PID=$!
+          
+          sleep 5
+          
+          curl -f -X POST \
+            "http://127.0.0.1:8081/bot${{ secrets.TELEGRAM_TOKEN }}/sendMediaGroup" \
+            -F "chat_id=-${{ vars.TG_CI_UPLOAD_TARGET_CHANNEL }}" \
+            -F "message_thread_id=${{ vars.TG_CI_UPLOAD_TARGET_REPLY_ID }}" \
+            -F "media=[{\"type\":\"document\",\"media\":\"attach://apk\",\"parse_mode\":\"MarkdownV2\",\"caption\":${{ steps.prepare.outputs.escaped_message }}}]" \
+            -F "apk=@$APK_FILE"
+          
+          kill $BOT_PID || true 
